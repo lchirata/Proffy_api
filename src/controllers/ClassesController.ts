@@ -1,0 +1,108 @@
+import { Request, Response} from 'express';
+
+import db from '../database/connection';
+import convertHourToMinutes from '../utils/convertHourToMinutes';
+
+
+interface ScheduleItem {
+    week_day: number;
+    from: string;
+    to: string;
+}
+
+
+export default class ClassesController {
+
+    //Criando Filtros
+
+    async index(request: Request, response: Response){
+
+        const filters = request.query;
+
+        const subject = filters.subject as string;
+        const week_day = filters.week_day as string;
+        const time = filters.time as string;
+
+        if(!filters.week_day || !filters.subject || !filters.time){
+            return response.status(400).json({
+                error: "Missing filters to search classes"
+            });
+        }
+
+        const timeInMinutes = convertHourToMinutes(time);
+        
+        const classes = await db ('classes')
+        .whereExists(function(){
+            this.select('classes_schedule.*')
+            .from('classes_schedule')
+            .whereRaw('`classes_schedule`.`class_id` = `classes`.`id`')
+            .whereRaw('`classes_schedule`.`week_day` = ??', [Number(week_day)])
+            .whereRaw('`classes_schedule`.`from` <= ??', [timeInMinutes])
+        })
+        .where('classes.subject', '=', subject)
+        .join('users','classes.user_id', '=', 'users.id')
+        .select(['classes.*', 'users.*']);
+
+        return response.json(classes);
+
+    }
+
+    async create(request: Request, response: Response) {
+        // return response.json({ message: 'Hello Word!'});
+        const {
+            name,
+            avatar,
+            whatsapp,
+            bio,
+            subject,
+            cost,
+            schedule
+        } = request.body;
+
+        const trx = await db.transaction();
+
+        try {
+            const insertUsersIds = await trx('users').insert({
+                name,
+                avatar,
+                whatsapp,
+                bio,
+            });
+
+            const user_id = insertUsersIds[0];
+
+            const insertedClassesID = await trx('classes').insert({
+                subject,
+                cost,
+                user_id,
+            });
+
+            const class_id = insertUsersIds[0];
+
+            const classSchedule = schedule.map((scheduleItem: ScheduleItem) => {
+                return {
+                    class_id,
+                    week_day: scheduleItem.week_day,
+                    from: convertHourToMinutes(scheduleItem.from),
+                    to: convertHourToMinutes(scheduleItem.to),
+                };
+            })
+            //map percorre cada um dos itens do schedule e transforma em um novo objeto
+
+            await trx('classes_schedule').insert(classSchedule);
+
+            await trx.commit();
+
+            return response.status(201).send();
+        } catch (err) {
+
+            await trx.rollback();
+
+            console.log(err);
+            return response.status(400).json({
+                error: 'Unexpeted error while creating a new class'
+            })
+        }
+
+    }
+}
